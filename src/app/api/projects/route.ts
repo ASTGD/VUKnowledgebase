@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth";
-import { deleteProject, getDb, listProjects } from "@/lib/db";
+import { getDb } from "@/lib/db";
 import { processPendingChunks, runBackground } from "@/lib/processor";
-
 
 export async function GET() {
   const session = await getAdminSession();
@@ -10,7 +9,7 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const projects = await listProjects();
+  const projects = await getDb().listProjects();
 
   // Kick off resume of anything left over from previous sessions
   // (e.g. while the admin was away). Fire and forget.
@@ -44,22 +43,15 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const db = getDb();
-  const inserted = await db`
-    INSERT INTO projects (name)
-    VALUES (${name})
-    ON CONFLICT (name) DO NOTHING
-    RETURNING id, name, created_at
-  `;
-
-  if (inserted.length === 0) {
+  const project = await getDb().createProject(name);
+  if (!project) {
     return NextResponse.json(
       { error: `A project named "${name}" already exists` },
       { status: 409 },
     );
   }
 
-  return NextResponse.json({ project: inserted[0] }, { status: 201 });
+  return NextResponse.json({ project }, { status: 201 });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -71,8 +63,8 @@ export async function DELETE(req: NextRequest) {
   if (!id) {
     return NextResponse.json({ error: "Missing project id" }, { status: 400 });
   }
-  const deleted = await deleteProject(id);
-  if (deleted.count === 0) {
+  const deletedCount = await getDb().deleteProject(id);
+  if (deletedCount === 0) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true });

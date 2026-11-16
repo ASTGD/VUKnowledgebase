@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAdminSession } from "@/lib/auth";
-import { getDb, getProject, listDocuments } from "@/lib/db";
+import { getDb } from "@/lib/db";
 import { detectKind, extractText } from "@/lib/extract";
 import { chunkText } from "@/lib/chunk";
 import { processPendingChunks, runBackground } from "@/lib/processor";
@@ -26,7 +26,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
   const { id } = await params;
-  const documents = await listDocuments(id);
+  const documents = await getDb().listDocuments(id);
   return NextResponse.json({ documents });
 }
 
@@ -37,8 +37,8 @@ export async function POST(req: NextRequest, { params }: Params) {
   }
 
   const { id: projectId } = await params;
-  const project = await getProject(projectId);
-  if (project.length === 0) {
+  const project = await getDb().getProject(projectId);
+  if (!project) {
     return NextResponse.json({ error: "Project not found" }, { status: 404 });
   }
 
@@ -91,23 +91,13 @@ export async function POST(req: NextRequest, { params }: Params) {
         continue;
       }
 
-      const insertedDoc = await db`
-        INSERT INTO documents (project_id, filename, mime_type, size_bytes, chunk_count, status)
-        VALUES (${projectId}, ${file.name}, ${file.type || kind}, ${file.size}, ${chunks.length}, 'pending')
-        RETURNING id
-      `;
-      const documentId = insertedDoc[0].id as string;
-
-      const chunkValues = chunks.map((content, seq) => ({
-        document_id: documentId,
-        project_id: projectId,
-        seq,
-        content,
-      }));
-
-      await db`
-        INSERT INTO chunks ${db(chunkValues)}
-      `;
+      const documentId = await db.insertDocument({
+        projectId,
+        filename: file.name,
+        mimeType: file.type || kind,
+        sizeBytes: file.size,
+        chunks,
+      });
 
       createdDocumentIds.push(documentId);
       results.push({ ok: true, filename: file.name, documentId, chunks: chunks.length });
@@ -126,5 +116,5 @@ export async function POST(req: NextRequest, { params }: Params) {
     runBackground(() => processPendingChunks({ projectId, documentId }));
   }
 
-  return NextResponse.json({ results, documents: await listDocuments(projectId) });
+  return NextResponse.json({ results, documents: await db.listDocuments(projectId) });
 }

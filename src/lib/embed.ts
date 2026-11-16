@@ -21,10 +21,6 @@ export function embeddingConfig() {
   return { apiKey, model, dims };
 }
 
-export function pgVectorLiteral(vector: number[]): string {
-  return `[${vector.join(",")}]`;
-}
-
 type EmbedBatchOptions = {
   maxRetries?: number;
 };

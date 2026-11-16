@@ -19,7 +19,8 @@ Copy `.env.example` to `.env` (local) or set them in Vercel (Project → Setting
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | Postgres connection string. The database needs the **pgvector** extension (Neon and Supabase have it built in). |
+| `DATABASE_URL` | yes in production | Postgres connection string. The database needs the **pgvector** extension (Neon and Supabase have it built in). Not needed when using SQLite locally. |
+| `DB_DRIVER` | no | Set to `sqlite` to use a local SQLite file instead of Postgres (local testing only). Alternatively set `SQLITE_FILE`. |
 | `GOOGLE_API_KEY` | yes | API key for gemini-embedding-001 (https://aistudio.google.com/apikey). |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | yes | The single admin login. |
 | `AUTH_SECRET` | yes | Random string used to sign the session JWT. |
@@ -31,9 +32,15 @@ Copy `.env.example` to `.env` (local) or set them in Vercel (Project → Setting
 
 ```bash
 npm install
-npm run db:init     # creates the schema (projects, documents, chunks) — run once per database
+npm run db:init     # postgres only: creates the schema — run once per database
 npm run dev
 ```
+
+**Local testing without a Postgres server:** set `DB_DRIVER=sqlite` in `.env`
+(optionally with `SQLITE_FILE=local.db`, the default file is `local.db`).
+The schema is created automatically on first use; embeddings are stored as
+JSON (this app never queries vectors by similarity yet — similarity search
+runs on the Postgres/pgvector deployment).
 
 Open http://localhost:3000 → log in with your admin credentials → create a project → upload files.
 

@@ -1,6 +1,6 @@
 import { waitUntil } from "@vercel/functions";
 import { getDb } from "./db";
-import { embedTexts, pgVectorLiteral } from "./embed";
+import { embedTexts } from "./embed";
 
 /**
  * Durable background embedding pipeline.
@@ -8,8 +8,8 @@ import { embedTexts, pgVectorLiteral } from "./embed";
  * How conversion continues after the admin closes the browser:
  *  1. Upload responses hand off to Fluid Compute `waitUntil`, which keeps the
  *     function instance working after the HTTP response is sent.
- *  2. Queue state lives in Postgres (chunks.status = 'pending'), never only in
- *     memory — if an instance dies mid-document, nothing is lost.
+ *  2. Queue state lives in the database (chunks.status = 'pending'), never
+ *     only in memory — if an instance dies mid-document, nothing is lost.
  *  3. Every dashboard load and every cron tick calls processPendingChunks(),
  *     which reclaims stale 'processing' documents and resumes where the
  *     previous instance left off. The admin sees the final report on next login.
@@ -18,6 +18,7 @@ import { embedTexts, pgVectorLiteral } from "./embed";
 const BATCH_SIZE = 16;
 const MAX_ATTEMPTS_PER_CHUNK = 5;
 const STALE_PROCESSING_MINUTES = 10;
+const MAX_DOCS_PER_RUN = 50;
 
 const inFlight = new Set<string>();
 
@@ -37,15 +38,6 @@ type ProcessOptions = {
   documentId?: string;
 };
 
-type PendingDoc = { document_id: string };
-type ChunkRow = { id: string; content: string };
-type ChunkCounts = {
-  pending: number;
-  failed: number;
-  done: number;
-  total: number;
-};
-
 /**
  * Processes every chunk still pending in the database, document by document.
  * Returns when the queue is empty or only exhausted chunks remain.
@@ -54,21 +46,15 @@ export async function processPendingChunks(
   options: ProcessOptions = {},
 ): Promise<void> {
   const db = getDb();
+  const documentIds = await db.pendingDocumentIds({
+    projectId: options.projectId,
+    documentId: options.documentId,
+    limit: MAX_DOCS_PER_RUN,
+    maxAttempts: MAX_ATTEMPTS_PER_CHUNK,
+  });
 
-  const docs = await db<PendingDoc[]>`
-    SELECT DISTINCT d.id AS document_id
-    FROM documents d
-    JOIN chunks c ON c.document_id = d.id
-    WHERE c.status = 'pending'
-      AND c.attempts < ${MAX_ATTEMPTS_PER_CHUNK}
-      ${options.projectId ? db`AND d.project_id = ${options.projectId}` : db``}
-      ${options.documentId ? db`AND d.id = ${options.documentId}` : db``}
-    ORDER BY document_id
-    LIMIT 50
-  `;
-
-  for (const doc of docs) {
-    await processDocument(doc.document_id);
+  for (const documentId of documentIds) {
+    await processDocument(documentId);
   }
 }
 
@@ -81,110 +67,59 @@ export async function processDocument(documentId: string): Promise<void> {
 
     // Claim the document. A crashed instance's claim expires after the stale
     // window, so the next resume attempt takes over automatically.
-    const claimed = await db<{ id: string }[]>`
-      UPDATE documents
-      SET status = 'processing',
-          updated_at = now()
-      WHERE id = ${documentId}
-        AND status <> 'completed'
-        AND (
-          status <> 'processing'
-          OR updated_at < now() - make_interval(mins => ${STALE_PROCESSING_MINUTES})
-        )
-      RETURNING id
-    `;
-    if (claimed.length === 0) return;
+    const claimed = await db.claimDocument(
+      documentId,
+      STALE_PROCESSING_MINUTES,
+    );
+    if (!claimed) return;
 
     let lastError: string | null = null;
 
     for (;;) {
-      const batch = await db<ChunkRow[]>`
-        SELECT id, content
-        FROM chunks
-        WHERE document_id = ${documentId}
-          AND status = 'pending'
-          AND attempts < ${MAX_ATTEMPTS_PER_CHUNK}
-        ORDER BY seq
-        LIMIT ${BATCH_SIZE}
-      `;
+      const batch = await db.nextChunkBatch(
+        documentId,
+        BATCH_SIZE,
+        MAX_ATTEMPTS_PER_CHUNK,
+      );
       if (batch.length === 0) break;
 
       try {
         const vectors = await embedTexts(batch.map((c) => c.content));
 
         for (let i = 0; i < batch.length; i++) {
-          await db`
-            UPDATE chunks
-            SET status = 'done',
-                embedding = ${pgVectorLiteral(vectors[i])}::vector,
-                attempts = attempts + 1,
-                updated_at = now()
-            WHERE id = ${batch[i].id}
-          `;
+          await db.saveEmbeddedChunk(batch[i].id, vectors[i]);
         }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
-        console.error(`[processor] embedding failed for ${documentId}: ${lastError}`);
+        console.error(
+          `[processor] embedding failed for ${documentId}: ${lastError}`,
+        );
 
         // Consume an attempt per chunk; exhaust them so permanently broken
         // docs stop retrying, while transient failures stay retryable.
         for (const chunk of batch) {
-          const rows = await db<{ exhausted: boolean }[]>`
-            UPDATE chunks
-            SET attempts = attempts + 1
-            WHERE id = ${chunk.id}
-              AND attempts < ${MAX_ATTEMPTS_PER_CHUNK}
-            RETURNING (attempts >= ${MAX_ATTEMPTS_PER_CHUNK}) AS exhausted
-          `;
-          if (rows.length > 0 && rows[0].exhausted) {
-            await db`UPDATE chunks SET status = 'failed' WHERE id = ${chunk.id}`;
-          }
+          await db.bumpChunkAttempts(chunk.id, MAX_ATTEMPTS_PER_CHUNK);
         }
+        await db.setDocumentError(documentId, lastError);
         break; // Stop hammering the API this tick; a later resume takes over.
       }
 
-      await db`
-        UPDATE documents
-        SET updated_at = now()
-        WHERE id = ${documentId}
-      `;
+      await db.touchDocument(documentId);
     }
 
-    const counts = await db<ChunkCounts[]>`
-      SELECT
-        COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
-        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
-        COUNT(*) FILTER (WHERE status = 'done')::int AS done,
-        COUNT(*)::int AS total
-      FROM chunks
-      WHERE document_id = ${documentId}
-    `;
-    const { pending, failed, total } = counts[0];
+    const counts = await db.chunkCounts(documentId);
 
-    if (pending > 0) {
-      await db`
-        UPDATE documents
-        SET status = 'processing',
-            updated_at = now(),
-            error = ${lastError}
-        WHERE id = ${documentId}
-      `;
-    } else if (failed > 0) {
-      await db`
-        UPDATE documents
-        SET status = 'failed',
-            processed_at = now(),
-            error = COALESCE(${lastError}, ${`${failed}/${total} chunks exhausted the maximum number of embedding attempts.`})
-        WHERE id = ${documentId}
-      `;
+    if (counts.pending > 0) {
+      await db.setDocumentFinalStatus(documentId, "processing", lastError);
+    } else if (counts.failed > 0) {
+      await db.setDocumentFinalStatus(
+        documentId,
+        "failed",
+        lastError ??
+          `${counts.failed}/${counts.total} chunks exhausted the maximum number of embedding attempts.`,
+      );
     } else {
-      await db`
-        UPDATE documents
-        SET status = 'completed',
-            processed_at = now(),
-            error = NULL
-        WHERE id = ${documentId}
-      `;
+      await db.setDocumentFinalStatus(documentId, "completed", null);
     }
   } finally {
     inFlight.delete(documentId);
