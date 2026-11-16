@@ -1,17 +1,23 @@
 {
-  "name": "temp-scaffold",
+  "name": "vu-knowledgebase",
   "version": "0.1.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:init": "node scripts/init-db.mjs"
   },
   "dependencies": {
+    "@vercel/functions": "^3.11.3",
+    "jose": "^6.2.17",
+    "mammoth": "^1.13.0",
     "next": "16.4.6",
+    "postgres": "^4.1.1",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "unpdf": "^2.2.1"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "4.3.3",
