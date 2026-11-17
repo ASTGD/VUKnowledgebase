@@ -34,4 +34,5 @@ export type {
   InsertDocumentInput,
   ProjectRow,
   ProjectSummary,
+  SearchHit,
 } from "./types";

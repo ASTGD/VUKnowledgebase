@@ -8,6 +8,7 @@ import type {
   DocumentWithProgress,
   ProjectRow,
   ProjectSummary,
+  SearchHit,
 } from "./types";
 
 /**
@@ -363,6 +364,52 @@ export function createSqliteDriver(): DbDriver {
           .prepare("UPDATE documents SET status = 'processing', updated_at = ?, error = ? WHERE id = ?")
           .run(ts, error, documentId);
       }
+    },
+
+    async searchSimilarChunks(vector, opts): Promise<SearchHit[]> {
+      const min = opts.minSimilarity ?? 0;
+      // Brute-force cosine similarity in JS; SQLite is the local-testing
+      // driver only, so a full scan is fine here.
+      const rows = getDb()
+        .prepare(
+          `SELECT c.id, c.document_id, d.filename, c.content, c.embedding
+           FROM chunks c
+           JOIN documents d ON d.id = c.document_id
+           WHERE c.status = 'done' AND c.embedding IS NOT NULL`,
+        )
+        .all() as unknown as Array<{
+        id: string;
+        document_id: string;
+        filename: string;
+        content: string;
+        embedding: string;
+      }>;
+
+      let sumSq = 0;
+      for (const v of vector) sumSq += v * v;
+      const queryNorm = Math.sqrt(sumSq) || 1;
+
+      return rows
+        .map((row) => {
+          const stored = JSON.parse(row.embedding) as number[];
+          let dot = 0;
+          let storedNorm = 0;
+          for (let i = 0; i < vector.length; i++) {
+            dot += vector[i] * (stored[i] ?? 0);
+            storedNorm += (stored[i] ?? 0) ** 2;
+          }
+          const similarity = dot / (queryNorm * (Math.sqrt(storedNorm) || 1));
+          return {
+            chunkId: row.id,
+            documentId: row.document_id,
+            filename: row.filename,
+            content: row.content,
+            similarity,
+          };
+        })
+        .filter((hit) => hit.similarity >= min)
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, opts.limit);
     },
   };
 }

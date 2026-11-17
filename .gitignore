@@ -42,3 +42,7 @@ next-env.d.ts
 
 # local sqlite db
 local.db*
+
+# local scrape/verification artifacts (agent research downloads)
+/.tmp-vu/
+/.tmp-embedding.json

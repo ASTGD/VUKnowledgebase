@@ -35,6 +35,15 @@ export type ChunkCounts = {
   total: number;
 };
 
+export type SearchHit = {
+  chunkId: string;
+  documentId: string;
+  filename: string;
+  content: string;
+  /** Cosine similarity in [0, 1]; 1 = identical direction. */
+  similarity: number;
+};
+
 export type DbDriver = {
   kind: "postgres" | "sqlite";
 
@@ -85,4 +94,14 @@ export type DbDriver = {
     status: "processing" | "completed" | "failed",
     error: string | null,
   ): Promise<void>;
+
+  // Retrieval
+  /**
+   * Cosine-similarity search over embedded chunks, best-first.
+   * `minSimilarity` is optional; when given, weaker hits are dropped.
+   */
+  searchSimilarChunks(
+    vector: number[],
+    opts: { limit: number; minSimilarity?: number },
+  ): Promise<SearchHit[]>;
 };

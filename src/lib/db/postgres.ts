@@ -8,6 +8,7 @@ import type {
   InsertDocumentInput,
   ProjectRow,
   ProjectSummary,
+  SearchHit,
 } from "./types";
 
 // Lazy Postgres client so importing route modules at build time never fails
@@ -263,6 +264,27 @@ export function createPostgresDriver(): DbDriver {
           WHERE id = ${documentId}
         `;
       }
+    },
+
+    async searchSimilarChunks(vector, opts): Promise<SearchHit[]> {
+      const literal = pgVectorLiteral(vector);
+      const sql = getSql();
+      const rows = await sql<(Omit<SearchHit, "similarity"> & { similarity: number })[]>`
+        SELECT
+          c.id,
+          c.document_id,
+          d.filename,
+          c.content,
+          1 - (c.embedding <=> ${literal}::vector) AS similarity
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE c.status = 'done'
+          AND c.embedding IS NOT NULL
+          ${opts.minSimilarity !== undefined ? sql`AND 1 - (c.embedding <=> ${literal}::vector) >= ${opts.minSimilarity}` : sql``}
+        ORDER BY c.embedding <=> ${literal}::vector
+        LIMIT ${opts.limit}
+      `;
+      return rows;
     },
   };
 }

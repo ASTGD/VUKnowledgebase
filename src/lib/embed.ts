@@ -21,9 +21,18 @@ export function embeddingConfig() {
   return { apiKey, model, dims };
 }
 
+type EmbedTaskType = "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY";
+
 type EmbedBatchOptions = {
   maxRetries?: number;
+  taskType?: EmbedTaskType;
 };
+
+/** Embeds a single query text with the RETRIEVAL_QUERY task type. */
+export async function embedQuery(text: string): Promise<number[]> {
+  const vectors = await embedTexts([text], { taskType: "RETRIEVAL_QUERY" });
+  return vectors[0];
+}
 
 /** Embeds a batch of texts (max 16) and returns vectors in the same order. */
 export async function embedTexts(
@@ -41,7 +50,7 @@ export async function embedTexts(
     requests: texts.map((text) => ({
       model: `models/${model}`,
       content: { parts: [{ text }] },
-      taskType: "RETRIEVAL_DOCUMENT",
+      taskType: options.taskType ?? "RETRIEVAL_DOCUMENT",
       outputDimensionality: dims,
     })),
   };
