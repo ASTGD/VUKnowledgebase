@@ -4,7 +4,7 @@ import { transcribeAudio } from "@/lib/transcribe";
 
 export const maxDuration = 120;
 
-const MAX_AUDIO_BYTES = 20 * 1024 * 1024; // Gemini inline_data limit
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // Groq whisper file limit
 
 export async function POST(req: NextRequest) {
   await connection(); // never prerender this route at build time
@@ -24,12 +24,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Recording too long." }, { status: 413 });
   }
 
-  // Keep only the base type — Chrome's "audio/webm;codecs=opus" stays valid.
-  const mimeType = (audio.type || "audio/webm").split(";")[0];
-
   try {
-    const buffer = Buffer.from(await audio.arrayBuffer());
-    const text = await transcribeAudio(buffer, mimeType);
+    const text = await transcribeAudio(audio);
     if (!text) {
       return NextResponse.json(
         { error: "Could not hear any speech in that recording." },
@@ -40,7 +36,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("[transcribe] failed:", err);
     const message = err instanceof Error ? err.message : "transcription failed";
-    const status = message.includes("GOOGLE_API_KEY") ? 503 : 502;
+    const status = message.includes("GROQ_API_KEY") ? 503 : 502;
     return NextResponse.json(
       { error: "Voice transcription failed. You can type your question instead." },
       { status },
